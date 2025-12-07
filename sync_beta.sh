@@ -1,113 +1,123 @@
 #!/bin/bash
+# sync_beta.sh
 
 set -e
 set -o pipefail
 
-echo "INFO: Starting the sync process for Organic Maps beta..."
+echo "INFO: Starting sync process for Organic Maps beta..."
 
-# --- 配置 ---
+# --- Configuration ---
 REMOTE_REPO="organicmaps/organicmaps"
 WORKFLOW_FILE="android-beta.yaml"
-# 【已验证】这是正确的变量名
+# Verified: this is the stable URL for release notes
 RELEASE_NOTES_URL="https://raw.githubusercontent.com/organicmaps/organicmaps/master/android/app/src/fdroid/play/listings/en-US/release-notes.txt"
 CURRENT_REPO="$REPO"
 LINK_EXPIRATION_SECONDS=3600
-PREFERRED_ARTIFACT_NAMES=("fdroid-beta" "google-beta")
+# Priority updated: 'google-beta' is now the primary artifact target
+PREFERRED_ARTIFACT_NAMES=("google-beta" "fdroid-beta")
 
-# --- 脚本临时文件 ---
+# --- Temp Files ---
 RELEASE_NOTES_FILENAME="release_notes.txt"
 ARTIFACT_DIR=$(mktemp -d)
 
-# 清理函数
+# Cleanup function
 cleanup() {
-  echo "INFO: Cleaning up temporary files and directories..."
+  echo "INFO: Cleaning up temp files..."
   rm -f "${RELEASE_NOTES_FILENAME}"
   rm -rf "${ARTIFACT_DIR}"
 }
 trap cleanup EXIT
 
-# 1. 获取最新的成功构建信息
-echo "INFO: Fetching the latest successful run from ${REMOTE_REPO}..."
+# 1. Fetch latest successful workflow run
+echo "INFO: Fetching latest successful run from ${REMOTE_REPO}..."
 RUN_INFO=$(gh run list --repo "${REMOTE_REPO}" --workflow "${WORKFLOW_FILE}" --limit 1 --json databaseId,conclusion,updatedAt --jq '.[] | select(.conclusion=="success")')
 
 if [ -z "$RUN_INFO" ]; then
-  echo "INFO: No recent successful run found for workflow '${WORKFLOW_FILE}'. Nothing to do. Exiting."
+  echo "INFO: No recent successful run found. Exiting."
   exit 0
 fi
 
 LATEST_RUN_ID=$(echo "$RUN_INFO" | jq -r '.databaseId')
 RUN_UPDATED_AT=$(echo "$RUN_INFO" | jq -r '.updatedAt')
-echo "INFO: Found latest successful run ID: ${LATEST_RUN_ID}, completed at: ${RUN_UPDATED_AT}"
+echo "INFO: Found Run ID: ${LATEST_RUN_ID} (Time: ${RUN_UPDATED_AT})"
 
-# 2. 生成唯一的 Release 标签和标题
+# 2. Generate unique release tag
 RELEASE_TITLE=$(gh run view "${LATEST_RUN_ID}" --repo "${REMOTE_REPO}" --json displayTitle --jq '.displayTitle')
+# Sanitize title for tag usage
 TAG_NAME=$(echo "${RELEASE_TITLE}" | tr '[:upper:]' '[:lower:]' | sed -e 's/[^a-z0-9]/-/g' -e 's/--\+/-/g' -e 's/^-//' -e 's/-$//')
 TAG_NAME="${TAG_NAME}-${LATEST_RUN_ID}"
 
-echo "INFO: Generated release title: '${RELEASE_TITLE}'"
-echo "INFO: Generated tag name: '${TAG_NAME}'"
+echo "INFO: Generated Tag: '${TAG_NAME}'"
 
-# 3. 检查这个 Release 是否已经存在
-echo "INFO: Checking if release with tag '${TAG_NAME}' already exists..."
+# 3. Idempotency check: Exit if release exists
 if gh release view "${TAG_NAME}" --repo "${CURRENT_REPO}" > /dev/null 2>&1; then
-  echo "INFO: Release '${TAG_NAME}' already exists. Nothing to do. Exiting."
+  echo "INFO: Release '${TAG_NAME}' already exists. Nothing to do. Exiting (0)."
   exit 0
-else
-  echo "INFO: Release '${TAG_NAME}' does not exist. Proceeding..."
 fi
 
-# 4. 循环尝试下载优先列表中的 Artifact
+echo "INFO: New release detected. Proceeding..."
+
+# 4. Attempt to download artifact (Preferred method)
 APK_FILE_PATH=""
 for ARTIFACT_NAME in "${PREFERRED_ARTIFACT_NAMES[@]}"; do
-    echo "INFO: Attempting to download artifact '${ARTIFACT_NAME}' from run ${LATEST_RUN_ID}..."
+    echo "INFO: Trying to download artifact '${ARTIFACT_NAME}'..."
     if gh run download "${LATEST_RUN_ID}" --repo "${REMOTE_REPO}" -n "${ARTIFACT_NAME}" -D "${ARTIFACT_DIR}"; then
-        echo "INFO: Artifact '${ARTIFACT_NAME}' downloaded successfully."
-        echo "INFO: Searching for APK with specific pattern inside the artifact..."
-        APK_FILE_PATH=$(find "${ARTIFACT_DIR}" -type f | grep -E '/OrganicMaps-[0-9]{8}-[a-z]+-beta\.apk$' | head -n 1)
+        echo "INFO: Artifact '${ARTIFACT_NAME}' downloaded."
+        
+        # Updated Regex for new format: OrganicMaps-YYMMDDXX-google-beta.apk
+        # Matches 8 digits (YYMMDDXX) followed specifically by -google-beta.apk
+        echo "INFO: searching for APK matching 'OrganicMaps-*-google-beta.apk'..."
+        APK_FILE_PATH=$(find "${ARTIFACT_DIR}" -type f | grep -E 'OrganicMaps-[0-9]{8}-google-beta\.apk$' | head -n 1)
+        
+        # Fallback for legacy naming if new format isn't found, just in case
+        if [ -z "$APK_FILE_PATH" ]; then
+             echo "DEBUG: New format not found, trying generic pattern..."
+             APK_FILE_PATH=$(find "${ARTIFACT_DIR}" -type f | grep -E 'OrganicMaps-[0-9]{8}.*\.apk$' | head -n 1)
+        fi
+
         if [ -n "$APK_FILE_PATH" ]; then
-            echo "INFO: Found matching APK file: ${APK_FILE_PATH}"
+            echo "INFO: Found APK: ${APK_FILE_PATH}"
             break
         else
-            echo "WARNING: Artifact downloaded, but no APK matching the pattern was found. Trying next name..."
+            echo "WARNING: Artifact empty or APK naming mismatch. Trying next..."
         fi
     else
-        echo "INFO: Artifact '${ARTIFACT_NAME}' not found. Trying next name..."
+        echo "DEBUG: Artifact '${ARTIFACT_NAME}' not available."
     fi
 done
 
-# 5. 如果循环结束后仍未找到 APK，则回退到解析日志
+# 5. Fallback: Parse build logs for Firebase URL (Last resort)
 if [ -z "$APK_FILE_PATH" ]; then
-    echo "INFO: No suitable artifact found. Falling back to parsing download link from log."
+    echo "INFO: Artifact method failed. Fallback to log parsing."
+    # Check if log link is likely expired (1 hour limit)
     RUN_TIMESTAMP=$(date -d "${RUN_UPDATED_AT}" +%s)
     CURRENT_TIMESTAMP=$(date +%s)
-    AGE_SECONDS=$((CURRENT_TIMESTAMP - RUN_TIMESTAMP))
-    echo "INFO: Run is ${AGE_SECONDS} seconds old."
-    if [ "$AGE_SECONDS" -gt "$LINK_EXPIRATION_SECONDS" ]; then
-        echo "WARNING: Latest run is older than 1 hour. Log link expired. Stopping."
+    if [ $((CURRENT_TIMESTAMP - RUN_TIMESTAMP)) -gt "$LINK_EXPIRATION_SECONDS" ]; then
+        echo "WARNING: Run is too old for log parsing. Aborting."
         exit 0
     fi
-    echo "INFO: Downloading log for run ID ${LATEST_RUN_ID} to find the APK URL..."
+
+    echo "INFO: Scanning logs for Firebase URL..."
     APK_URL=$(gh run view "${LATEST_RUN_ID}" --repo "${REMOTE_REPO}" --log | grep -o 'https://firebaseappdistribution.googleapis.com[^[:space:]]*' | head -n 1)
+    
     if [ -z "$APK_URL" ]; then
-        echo "ERROR: Could not find the Firebase download URL in the log."
+        echo "ERROR: No download URL found in logs."
         exit 1
     fi
-    echo "INFO: Found APK download URL."
+
+    echo "INFO: Firebase URL found. Downloading..."
     TEMP_APK_FILENAME="${ARTIFACT_DIR}/organicmaps-beta.apk"
-    echo "INFO: Downloading APK from Firebase..."
     curl --location --retry 3 --fail -o "${TEMP_APK_FILENAME}" "${APK_URL}"
     APK_FILE_PATH="${TEMP_APK_FILENAME}"
-    echo "INFO: APK downloaded successfully as '${APK_FILE_PATH}'."
+    echo "INFO: Download complete: ${APK_FILE_PATH}"
 fi
 
-# 6. 下载官方的 Release Notes 文件
-echo "INFO: Downloading official release notes..."
-# 【已修正】确保使用正确的变量名 ${RELEASE_NOTES_URL}
+# 6. Download official release notes
+echo "INFO: Fetching release notes..."
 curl --silent --location --retry 3 -o "${RELEASE_NOTES_FILENAME}" "${RELEASE_NOTES_URL}"
-echo "INFO: Official release notes downloaded."
 
-# 7. 创建 Release 并上传最终找到的 APK 文件
-echo "INFO: Creating new release '${TAG_NAME}' and uploading the APK..."
+# 7. Publish Release
+echo "INFO: Publishing release '${TAG_NAME}'..."
 gh release create "${TAG_NAME}" \
   --repo "${CURRENT_REPO}" \
   --title "${RELEASE_TITLE}" \
@@ -115,4 +125,4 @@ gh release create "${TAG_NAME}" \
   --latest \
   "${APK_FILE_PATH}"
 
-echo "SUCCESS: Release created and APK uploaded successfully!"
+echo "SUCCESS: Sync complete."
