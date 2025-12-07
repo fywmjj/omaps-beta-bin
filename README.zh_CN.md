@@ -1,6 +1,16 @@
-# Organic Maps Beta - Android Beta APK
+<div align="center">
+  <img src="assets/images/logo-beta-round_192x192.png" width="100" height="100" alt="omaps-beta-logo">
+  <h1>Organic Maps Beta - Android Beta APK</h1>
+  <p>
+    <i><b>Where's Organic Maps Beta Package?</b></i>
+  </p>
+</div>
 
-***Where's Organic Maps Beta Package?***
+---
+
+[English](README.md) • **简体中文**
+
+---
 
 这是一个自动化项目，旨在解决直接从 Organic Maps 的 GitHub Actions 中下载 beta 版本 APK 包不便的问题。
 

@@ -1,6 +1,16 @@
+<div align="center">
+  <img src="assets/images/logo-beta-round_192x192.png" width="100" height="100" alt="omaps-beta-logo">
+  <h1>Organic Maps Beta - Android Beta APK</h1>
+  <p>
+    <i><b>Where's Organic Maps Beta Package?</b></i>
+  </p>
+</div>
 
-# Organic Maps Beta - Android Beta APK
-***Where's Organic Maps Beta Package?***
+---
+
+**English** • [简体中文](README.zh_CN.md)
+
+---
 
 This is an automation project designed to streamline the process of downloading beta APKs directly from Organic Maps' GitHub Actions.
 
